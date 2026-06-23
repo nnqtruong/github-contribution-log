@@ -2,7 +2,7 @@
 
 **Contributor:** Nguyen Nhat Quang Truong (`nnqtruong`)  
 **Cohort:** AI301 | AI Open Source Capstone — Summer 2026, Section 1C  
-**Status:** Phases I–IV Complete — PR open, awaiting maintainer review
+**Status:** Cycle 1 Phases I–IV Complete (PR #1095 open) · Cycle 2 started — discovered & fixed a separate `star` regression (PR #1097 open)
 
 > Living engineering journal for my CodePath AI301 capstone contribution.  
 > Updated every phase. Mentors and staff read this to know where I am and how to help.
@@ -22,6 +22,7 @@
 | **Branch** | `issue-1026-expression-is-true-fail-on-null` |
 | **Scope** | 1 macro + integration tests + README (4 files, +52 / −7 lines) |
 | **PR state** | Open — `resolves #1026`, CI pending |
+| **Cycle 2** | [#1096](https://github.com/dbt-labs/dbt-utils/issues/1096) → [PR #1097](https://github.com/dbt-labs/dbt-utils/pull/1097) — `star()` `rename` case-folding fix (see [Cycle 2](#cycle-2--star-rename-case-folding-fix-issue-1096--pr-1097) below) |
 
 ---
 
@@ -469,6 +470,155 @@ SQL three-valued logic (`TRUE`, `FALSE`, `NULL`) is a common source of silent bu
 - [ ] CI green
 - [ ] PR merged
 
+> **Second contribution cycle started** (rubric: "The Full Open Source Loop") — while monitoring this PR's CI I found, reported, and fixed a separate regression. Full write-up in [Cycle 2](#cycle-2--star-rename-case-folding-fix-issue-1096--pr-1097) below.
+
+---
+
+## Cycle 2 — `star()` rename case-folding fix (Issue #1096 → PR #1097)
+
+> A full Phase I–IV loop on a second bug, opened while watching Cycle 1's CI: **discovered → reported → reproduced → fixed → PR**. Self-found regression, not a pre-vetted list issue.
+
+### At a Glance (Cycle 2)
+
+| Field | Value |
+|---|---|
+| **Issue** | [#1096 — `star()` `rename` ignored on case-folding warehouses](https://github.com/dbt-labs/dbt-utils/issues/1096) (I reported it) |
+| **Pull Request** | [#1097 — fix(star): match `rename` keys case-insensitively](https://github.com/dbt-labs/dbt-utils/pull/1097) |
+| **Type** | Bug (regression introduced in #1094) |
+| **Branch** | `fix-star-rename-case-insensitivity` |
+| **Scope** | 1 macro + 1 integration test + README (3 files, +18 / −3 lines) |
+| **PR state** | Open — `resolves #1096` |
+
+### Phase I — Discovery & Issue Selection
+
+**How I found it.** Watching CI on my Cycle 1 PR (#1095), the **Snowflake** job was red — but on a test I never touched: `assert_equal_test_star_unquote_aliases_actual__expected`, part of the `star` macro. I traced it: all four of my `expression_is_true` tests passed; the failing test belongs to #1094 (`feature/star-unquote-alias-rename`), merged to `main` on 2026-06-18. Because PR CI runs against the branch *merged into* `main`, my PR inherited a failure that already exists on `main` — confirmed by #1094's own post-merge run showing the identical `FAIL 2`.
+
+**Why I chose it.** A real, unowned regression (no existing issue or PR), in the same Jinja/SQL identifier-semantics lane as Cycle 1, small enough to own end-to-end. Fixing it restores clean CI signal for the whole repo, not just my PR.
+
+**Issue filed:** [#1096](https://github.com/dbt-labs/dbt-utils/issues/1096) with root-cause analysis and a reproduction.
+
+### Phase II — Reproduce & Plan
+
+**Root cause.** `star()`'s `rename` (added in #1094) looks up aliases case-sensitively:
+
+```jinja
+{%- if col in rename %} as {{ rename[col] }}
+```
+
+`get_filtered_columns_in_relation()` returns column names as the warehouse stores them. Snowflake folds unquoted identifiers to UPPERCASE (`COLUMN_ONE`), but the test/user passes a lowercase key (`{"column_one": ...}`), so `col in rename` is always false → the rename is silently dropped. The two rename rows in `test_star_unquote_aliases` mismatch → `FAIL 2` on Snowflake. Lowercase-folding adapters (Postgres / Redshift / BigQuery) match by luck, so the bug is invisible there.
+
+**Analogous pattern in the codebase.** The same macro family already solves this for `except`, in `get_filtered_columns_in_relation`:
+
+```jinja
+{%- set except = except | map("lower") | list %}
+{%- if col.column|lower not in except -%}
+```
+
+So the fix mirrors it: normalize `rename` keys to lowercase and compare `col | lower`.
+
+**Reproduction (local, Postgres).** I can't run Snowflake locally, so I reproduced the *same class* of failure on Postgres by supplying a rename key whose case differs from the stored column (`{"COLUMN_ONE": "renamed_col"}` against a `column_one` column). Against the buggy macro, `dbt test --select test_star_unquote_aliases` → `FAIL 1` ("Got 1 result"). This proves the bug is about case-matching, not Snowflake specifically.
+
+**UMPIRE plan:**
+
+| Phase | Content |
+|---|---|
+| **Understand** | Case-sensitive `rename` lookup vs adapter identifier folding; both `quote_identifiers` branches affected |
+| **Match** | `except` normalization in `get_filtered_columns_in_relation` (`map("lower")`) |
+| **Plan** | Build a lowercased `rename_lookup`; compare `col \| lower`; add a cross-adapter regression row; document in README |
+| **Implement** | Phase III below |
+| **Review** | Local Postgres run + PR against `main` |
+| **Evaluate** | Regression row fails on buggy macro, passes on fix; full `star` suite `PASS=5` |
+
+### Phase III — Build
+
+**Commits:**
+
+| Hash | Message |
+|---|---|
+| `c2afa53` | fix(star): match `rename` keys to column names case-insensitively |
+| `f29cefe` | test(star): cover case-insensitive `rename` matching |
+| `bb78cf2` | docs(star): note case-insensitive `rename` matching |
+
+**Files modified:**
+
+| File | Change |
+|---|---|
+| `macros/sql/star.sql` | Build a lowercased `rename_lookup`; match `col \| lower` in both branches |
+| `integration_tests/models/sql/test_star_unquote_aliases.sql` | New row: uppercase rename key vs lowercase column |
+| `README.md` | Note that `rename` keys match case-insensitively |
+
+**Macro change (core fix):**
+
+```jinja
+{% set cols = dbt_utils.get_filtered_columns_in_relation(from, except) %}
+
+{#-- Match `rename` keys case-insensitively, consistent with `except`. #}
+{%- set rename_lookup = {} -%}
+{%- for rename_key, rename_value in rename.items() -%}
+    {%- do rename_lookup.update({rename_key | lower: rename_value}) -%}
+{%- endfor -%}
+...
+{%- if col | lower in rename_lookup %} as {{ rename_lookup[col | lower] }}
+```
+
+**Testing:**
+
+| Step | Result |
+|---|---|
+| New regression row vs **buggy** macro (Postgres) | `FAIL 1` — bug reproduced |
+| New regression row vs **fixed** macro (Postgres) | `PASS` |
+| Full `star` suite (5 tests) vs fixed macro (Postgres) | `PASS=5` |
+
+**Challenge faced — CRLF line endings.** `star.sql` is the one file in the repo with Windows CRLF terminators (introduced by #1094); the rest uses LF. My first edit normalized it to LF, which made `git diff` show the *entire file* as changed — exactly the "unrelated formatting" noise reviewers reject. I restored the original CRLF blob and re-applied only the three logical changes with line-ending-preserving edits, so the diff is 8 lines on the macro, not 99.
+
+**Edge cases considered:**
+
+| Edge case | Handling |
+|---|---|
+| Both `quote_identifiers` branches | Fixed both `col in rename` sites |
+| Lowercase-folding adapters | `col \| lower` against lowercased keys = no behavior change |
+| Two keys differing only in case | Last-write-wins in `rename_lookup` (same as a plain dict) |
+| `rename` precedence over `unquote_aliases` / prefix / suffix | Preserved — still the first `if` branch |
+
+### Phase IV — Pull Request
+
+**PR:** [#1097](https://github.com/dbt-labs/dbt-utils/pull/1097) — `resolves #1096`, open against `dbt-labs/dbt-utils:main`, follows the project template (Problem / Solution / Checklist).
+
+**Before / after (Postgres, verified locally):**
+
+```
+key {"COLUMN_ONE": "renamed_col"} on a column_one column
+Before:  FAIL 1  — compiled to "column_one"            (no alias, rename dropped)
+After:   PASS    — compiled to "column_one" as renamed_col
+Full star suite: PASS=5
+```
+
+**Plan vs. built:**
+
+| Plan | Built | Match? |
+|---|---|---|
+| Lowercased `rename_lookup`, compare `col \| lower` | ✅ both branches | Yes |
+| Mirror `except` convention | ✅ | Yes |
+| Cross-adapter regression row | ✅ uppercase-key row | Yes |
+| README note | ✅ | Yes |
+| Minimal diff, no formatting churn | ✅ CRLF preserved, 3 files | Yes |
+
+**Cross-PR note.** Left a [comment on Cycle 1's PR (#1095)](https://github.com/dbt-labs/dbt-utils/pull/1095#issuecomment-4775047314) explaining the Snowflake red is pre-existing and now tracked by #1096 / #1097, so it doesn't block that review.
+
+**Teachable insight (Cycle 2).** Identifier case-folding differs by warehouse (Snowflake → upper, most others → lower). Any macro that matches a *user-supplied* column name against `get_columns_in_relation()` output must normalize case — `dbt-utils` already does this for `except`, and new column-name arguments should follow the same rule. A test that only runs on lowercase-folding adapters will hide the bug.
+
+### Phase IV Checklist (Cycle 2)
+- [x] Issue filed and triaged-ready (#1096) before the PR, per CONTRIBUTING.md
+- [x] PR open against upstream `main` (not fork-internal), `resolves #1096`
+- [x] PR follows project template; checklist filled
+- [x] New regression test that fails on the bug and passes on the fix
+- [x] Before/after evidence included (local Postgres)
+- [x] README updated
+- [x] Diff scoped to the fix (3 files, CRLF preserved)
+- [ ] Maintainer code review received
+- [ ] CI green
+- [ ] PR merged
+
 ---
 
 ## AI Usage Log
@@ -488,6 +638,10 @@ SQL three-valued logic (`TRUE`, `FALSE`, `NULL`) is a common source of silent bu
 | 2026-06-22 | Implementation | Scaffolded macro change, integration tests, README section | Reviewed every line; confirmed both branches; checked diff scope (4 files only) | I own the Jinja logic and test design |
 | 2026-06-22 | PR description | Drafted PR body following project template | Rewrote in my voice; verified `resolves #1026`; posted myself | PR description reflects my understanding of the tradeoff |
 | 2026-06-22 | Contribution reports | Drafted Phase II–IV report sections | Cross-checked against actual terminal output, commit hashes, PR URL | Reports are portfolio artifacts — must match what actually happened |
+| 2026-06-22 | Cycle 2 — CI triage | Helped read the failing Snowflake CI logs and isolate the failing test to the `star` macro | Pulled the logs myself (`gh run view --log-failed`); confirmed the same `FAIL 2` on `main`'s own post-#1094 run | The failure was *not* mine — verifying it on `main` before acting was the key step |
+| 2026-06-22 | Cycle 2 — root cause | Pointed at the case-sensitive `col in rename` lookup and the `except` precedent | Read `star.sql` and `get_filtered_columns_in_relation.sql` myself; traced Snowflake upper-case folding | The `except` analogy made the correct fix obvious — match the existing convention |
+| 2026-06-22 | Cycle 2 — implementation | Scaffolded the `rename_lookup` macro change, the regression test row, and README note | Ran the regression on Postgres against both the buggy and fixed macro myself (`FAIL 1` → `PASS`); kept the diff to 3 files | I own the Jinja and the test design; the CRLF-preservation call was mine to keep the diff clean |
+| 2026-06-22 | Cycle 2 — issue/PR/log | Drafted #1096, #1097, the #1095 CI note, and this Cycle 2 write-up | Verified every link, commit hash, and the `PASS=5` / `FAIL 1` outputs against my own terminal before posting | These are public, graded artifacts — they must match what actually ran |
 
 ---
 
@@ -502,3 +656,12 @@ SQL three-valued logic (`TRUE`, `FALSE`, `NULL`) is a common source of silent bu
 - Macro source: https://github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/expression_is_true.sql
 - Contributing guide: https://github.com/dbt-labs/dbt-utils/blob/main/CONTRIBUTING.md
 - Integration test guide: https://github.com/dbt-labs/dbt-utils/blob/main/integration_tests/README.md
+
+### Cycle 2 — `star()` rename case-folding fix
+- Issue: https://github.com/dbt-labs/dbt-utils/issues/1096
+- PR: https://github.com/dbt-labs/dbt-utils/pull/1097
+- Branch: https://github.com/nnqtruong/dbt-utils/tree/fix-star-rename-case-insensitivity
+- Regression introduced by: https://github.com/dbt-labs/dbt-utils/pull/1094
+- Cross-PR CI note on #1095: https://github.com/dbt-labs/dbt-utils/pull/1095#issuecomment-4775047314
+- Macro source: https://github.com/dbt-labs/dbt-utils/blob/main/macros/sql/star.sql
+- `except` precedent: https://github.com/dbt-labs/dbt-utils/blob/main/macros/sql/get_filtered_columns_in_relation.sql
