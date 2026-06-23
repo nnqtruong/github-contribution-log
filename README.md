@@ -2,7 +2,7 @@
 
 **Contributor:** Nguyen Nhat Quang Truong (`nnqtruong`)  
 **Cohort:** AI301 | AI Open Source Capstone — Summer 2026, Section 1C  
-**Status:** Cycle 1 Phases I–IV Complete (PR #1095 open) · Cycle 2 started — discovered & fixed a separate `star` regression (PR #1097 open)
+**Status:** Cycle 1 Phases I–IV Complete (PR #1095 open) · Cycle 2 in progress — found & filed a separate `star` regression (#1096); fix verified on Postgres, but Snowflake CI is still red, so PR #1097 is a **draft** under investigation
 
 > Living engineering journal for my CodePath AI301 capstone contribution.  
 > Updated every phase. Mentors and staff read this to know where I am and how to help.
@@ -22,7 +22,7 @@
 | **Branch** | `issue-1026-expression-is-true-fail-on-null` |
 | **Scope** | 1 macro + integration tests + README (4 files, +52 / −7 lines) |
 | **PR state** | Open — `resolves #1026`, CI pending |
-| **Cycle 2** | [#1096](https://github.com/dbt-labs/dbt-utils/issues/1096) → [PR #1097](https://github.com/dbt-labs/dbt-utils/pull/1097) — `star()` `rename` case-folding fix (see [Cycle 2](#cycle-2--star-rename-case-folding-fix-issue-1096--pr-1097) below) |
+| **Cycle 2** | [#1096](https://github.com/dbt-labs/dbt-utils/issues/1096) → [PR #1097 (draft)](https://github.com/dbt-labs/dbt-utils/pull/1097) — `star()` `rename` case-folding fix; Postgres-verified, **Snowflake CI still red — under investigation** (see [Cycle 2](#cycle-2--star-rename-case-folding-fix-issue-1096--pr-1097) below) |
 
 ---
 
@@ -476,18 +476,18 @@ SQL three-valued logic (`TRUE`, `FALSE`, `NULL`) is a common source of silent bu
 
 ## Cycle 2 — `star()` rename case-folding fix (Issue #1096 → PR #1097)
 
-> A full Phase I–IV loop on a second bug, opened while watching Cycle 1's CI: **discovered → reported → reproduced → fixed → PR**. Self-found regression, not a pre-vetted list issue.
+> A second-bug loop opened while watching Cycle 1's CI: **discovered → reported → reproduced → fix attempted → PR**. Self-found regression, not a pre-vetted list issue. **Honest status:** the fix is verified on Postgres, but the Snowflake CI job is still red and I have not yet reconciled why — so PR #1097 is a draft and this cycle is not "done." See [Open question](#open-question--snowflake-still-red) below.
 
 ### At a Glance (Cycle 2)
 
 | Field | Value |
 |---|---|
 | **Issue** | [#1096 — `star()` `rename` ignored on case-folding warehouses](https://github.com/dbt-labs/dbt-utils/issues/1096) (I reported it) |
-| **Pull Request** | [#1097 — fix(star): match `rename` keys case-insensitively](https://github.com/dbt-labs/dbt-utils/pull/1097) |
+| **Pull Request** | [#1097 — fix(star): match `rename` keys case-insensitively](https://github.com/dbt-labs/dbt-utils/pull/1097) (**draft**) |
 | **Type** | Bug (regression introduced in #1094) |
 | **Branch** | `fix-star-rename-case-insensitivity` |
 | **Scope** | 1 macro + 1 integration test + README (3 files, +18 / −3 lines) |
-| **PR state** | Open — `resolves #1096` |
+| **PR state** | **Draft** — `resolves #1096`. Postgres / Redshift / BigQuery CI green; **Snowflake red, under investigation** |
 
 ### Phase I — Discovery & Issue Selection
 
@@ -582,9 +582,9 @@ So the fix mirrors it: normalize `rename` keys to lowercase and compare `col | l
 
 ### Phase IV — Pull Request
 
-**PR:** [#1097](https://github.com/dbt-labs/dbt-utils/pull/1097) — `resolves #1096`, open against `dbt-labs/dbt-utils:main`, follows the project template (Problem / Solution / Checklist).
+**PR:** [#1097](https://github.com/dbt-labs/dbt-utils/pull/1097) — `resolves #1096`, **draft**, against `dbt-labs/dbt-utils:main`, follows the project template (Problem / Solution / Checklist).
 
-**Before / after (Postgres, verified locally):**
+**Before / after (Postgres only — verified locally):**
 
 ```
 key {"COLUMN_ONE": "renamed_col"} on a column_one column
@@ -592,6 +592,8 @@ Before:  FAIL 1  — compiled to "column_one"            (no alias, rename dropp
 After:   PASS    — compiled to "column_one" as renamed_col
 Full star suite: PASS=5
 ```
+
+> ⚠️ This evidence is **Postgres-only**. On the upstream PR, Postgres / Redshift / BigQuery CI are green but **Snowflake is still red** (`FAIL 2`). See [Open question](#open-question--snowflake-still-red). I am not claiming the Snowflake regression is fixed yet.
 
 **Plan vs. built:**
 
@@ -607,14 +609,32 @@ Full star suite: PASS=5
 
 **Teachable insight (Cycle 2).** Identifier case-folding differs by warehouse (Snowflake → upper, most others → lower). Any macro that matches a *user-supplied* column name against `get_columns_in_relation()` output must normalize case — `dbt-utils` already does this for `except`, and new column-name arguments should follow the same rule. A test that only runs on lowercase-folding adapters will hide the bug.
 
+### Open question — Snowflake still red
+
+After opening the PR, CI showed **Postgres / Redshift / BigQuery green but Snowflake still `FAIL 2`** on `test_star_unquote_aliases` — the same count as before the fix. This is unresolved and I am documenting it honestly rather than claiming a clean fix.
+
+What I checked:
+- The fix **is** in the exact code CI tested — I fetched the PR merge ref (`refs/pull/1097/merge`) and confirmed `rename_lookup` / `col | lower` are present.
+- By my reasoning, the fixed macro should make all four test rows pass on Snowflake, so an unchanged `FAIL 2` doesn't fit "the fix works" *or* "the fix is absent" (which would be `FAIL 3` given the new row) — pointing at a gap in my mental model of Snowflake's identifier folding, or a package-install/caching detail in the upstream tox harness.
+- I cannot reproduce this locally: I only have a Postgres container, and the bug is Snowflake-specific.
+
+Next steps I'd take (or hand to a maintainer with Snowflake access):
+1. Get the actual compiled `actual` vs `expected` strings for the two failing rows on Snowflake.
+2. Re-read `assert_equal` and the `data_star_quote_identifiers` seed's quoting under Snowflake.
+3. Rule out a stale `dbt_packages` install in the tox run.
+
+Until then, PR #1097 stays a **draft**.
+
 ### Phase IV Checklist (Cycle 2)
 - [x] Issue filed and triaged-ready (#1096) before the PR, per CONTRIBUTING.md
 - [x] PR open against upstream `main` (not fork-internal), `resolves #1096`
 - [x] PR follows project template; checklist filled
-- [x] New regression test that fails on the bug and passes on the fix
+- [x] New regression test that fails on the bug and passes on the fix **(on Postgres)**
 - [x] Before/after evidence included (local Postgres)
 - [x] README updated
 - [x] Diff scoped to the fix (3 files, CRLF preserved)
+- [x] Converted PR to **draft** and posted an honest CI-status note while Snowflake is unresolved
+- [ ] Snowflake CI failure understood / resolved
 - [ ] Maintainer code review received
 - [ ] CI green
 - [ ] PR merged
@@ -642,6 +662,7 @@ Full star suite: PASS=5
 | 2026-06-22 | Cycle 2 — root cause | Pointed at the case-sensitive `col in rename` lookup and the `except` precedent | Read `star.sql` and `get_filtered_columns_in_relation.sql` myself; traced Snowflake upper-case folding | The `except` analogy made the correct fix obvious — match the existing convention |
 | 2026-06-22 | Cycle 2 — implementation | Scaffolded the `rename_lookup` macro change, the regression test row, and README note | Ran the regression on Postgres against both the buggy and fixed macro myself (`FAIL 1` → `PASS`); kept the diff to 3 files | I own the Jinja and the test design; the CRLF-preservation call was mine to keep the diff clean |
 | 2026-06-22 | Cycle 2 — issue/PR/log | Drafted #1096, #1097, the #1095 CI note, and this Cycle 2 write-up | Verified every link, commit hash, and the `PASS=5` / `FAIL 1` outputs against my own terminal before posting | These are public, graded artifacts — they must match what actually ran |
+| 2026-06-22 | Cycle 2 — CI honesty check | After the PR opened, helped read CI: Snowflake still red despite the fix being in the tested merge ref | Pulled the PR checks and the merge ref myself; confirmed the contradiction; chose to convert the PR to draft and correct this log rather than overclaim | The fix passing on Postgres was not enough — I shouldn't have framed Snowflake as fixed before CI confirmed it. Logging the unknown honestly is the right call |
 
 ---
 
